@@ -2,7 +2,7 @@
 
 ## Overview
 
-A **Content Addressable Distributed File System (CADFS)** is used to manage and retrieve data across a network of nodes. Unlike traditional file systems that rely on hierarchical paths or filenames, CADFS identifies and accesses files based on their **content hash**. This ensures data integrity and efficient retrieval.
+This file system, built on top of Windows File System, manages and retrieves data across a network of nodes. Unlike traditional file systems that rely on hierarchical paths or filenames, CADFS identifies and accesses files based on their **content hash**. This ensures data integrity and efficient retrieval.
 
 ### How Content Addressing Works
 1. **File Key Hashing**:  
