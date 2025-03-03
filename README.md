@@ -1,4 +1,4 @@
-# A Distributed File System with Content Addressable Storage
+# FileSys-CAD: A Distributed File System with Content Addressable Storage
 
 ## Overview
 
