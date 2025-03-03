@@ -5,6 +5,15 @@ const (
 	IncomingStream  = 2
 )
 
+type MessageType int
+
+const (
+	MessageTypePing MessageType = iota
+	MessageTypeStore
+	MessageTypeGet
+	MessageTypeDelete
+)
+
 type RPC struct {
 	From    string
 	Payload []byte

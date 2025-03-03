@@ -153,6 +153,18 @@ func (s *Store) WriteDecrypt(encKey []byte, id string, key string, r io.Reader) 
 }
 
 func (s *Store) WriteEncrypt(encKey []byte, id string, key string, r io.Reader) (int64, error) {
+	// If key contains a version ID, use it directly
+	if strings.Contains(key, "_") {
+		return s.writeEncryptToPath(encKey, id, key, r)
+	}
+
+	// For new versions, append version ID to the key
+	versionID := crypto.GenerateID()
+	versionKey := fmt.Sprintf("%s_%s", key, versionID)
+	return s.writeEncryptToPath(encKey, id, versionKey, r)
+}
+
+func (s *Store) writeEncryptToPath(encKey []byte, id string, key string, r io.Reader) (int64, error) {
 	f, err := s.openFileForWriting(id, key)
 	if err != nil {
 		return 0, err

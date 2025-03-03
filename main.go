@@ -99,7 +99,7 @@ func main() {
 					defer file.Close()
 
 					// Call the FileServer's Store method
-					key := fmt.Sprintf("file_%d", time.Now().Unix())
+					key := fmt.Sprintf("file_%s", strings.ReplaceAll(file.Name(), "\\", "_"))
 					err = s.Store(key, file)
 					if err != nil {
 						return fmt.Errorf("failed to upload file: %v", err)
@@ -123,7 +123,7 @@ func main() {
 						return fmt.Errorf("please provide a key")
 					}
 					// Call the FileServer's Get method
-					reader, err := s.Get(key)
+					reader, err := s.Get(key, "")
 					if closer, ok := reader.(io.Closer); ok {
 						defer closer.Close()
 					}
@@ -224,13 +224,69 @@ func main() {
 					return nil
 				},
 			},
+			{
+				Name:  "versions",
+				Usage: "List versions of a file",
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "key",
+						Usage: "Key of the file",
+					},
+				},
+				Action: func(c *cli.Context) error {
+					key := c.String("key")
+					if key == "" {
+						return fmt.Errorf("please provide a key")
+					}
+					versions, err := s.ListVersions(key)
+					if err != nil {
+						return err
+					}
+					for _, v := range versions {
+						fmt.Printf("Version: %s\n", v.VersionID)
+						fmt.Printf("  Timestamp: %s\n", v.Timestamp.Format(time.RFC3339))
+						fmt.Printf("  Size: %d bytes\n", v.Size)
+						fmt.Printf("  Hash: %s\n", v.Hash)
+						fmt.Println()
+					}
+					return nil
+				},
+			},
+			{
+				Name:  "restore",
+				Usage: "Restore a specific version of a file",
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "key",
+						Usage: "Key of the file",
+					},
+					&cli.StringFlag{
+						Name:  "version",
+						Usage: "Version ID to restore",
+					},
+				},
+				Action: func(c *cli.Context) error {
+					key := c.String("key")
+					version := c.String("version")
+					if key == "" || version == "" {
+						return fmt.Errorf("please provide both key and version")
+					}
+					err := s.RestoreVersion(key, version)
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Restored version %s of file %s\n", version, key)
+					return nil
+				},
+			},
 		},
 	}
 
 	// Interactive CLI loop
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Print("dfs> ")
+		s.showHealthMessages()
+		fmt.Print("\ndfs> ")
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			log.Fatal(err)

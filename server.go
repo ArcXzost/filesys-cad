@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/gob"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -34,12 +35,13 @@ type FileServerOpts struct {
 type FileServer struct {
 	FileServerOpts
 
-	peerLock      sync.RWMutex // Use RWMutex for better performance
-	peers         map[string]p2p.Peer
-	peerServers   map[string]*FileServer // Map of peer addresses to FileServer instances
-	store         *store.Store
-	metadataStore *store.MetadataStore // Add metadata store
-	quitch        chan struct{}
+	peerLock       sync.RWMutex // Use RWMutex for better performance
+	peers          map[string]p2p.Peer
+	peerServers    map[string]*FileServer // Map of peer addresses to FileServer instances
+	store          *store.Store
+	metadataStore  *store.MetadataStore // Add metadata store
+	quitch         chan struct{}
+	healthMessages chan string
 }
 
 func NewFileServer(opts FileServerOpts) *FileServer {
@@ -64,6 +66,7 @@ func NewFileServer(opts FileServerOpts) *FileServer {
 		quitch:         make(chan struct{}),
 		peers:          make(map[string]p2p.Peer),
 		peerServers:    make(map[string]*FileServer),
+		healthMessages: make(chan string, 100),
 	}
 }
 
@@ -93,7 +96,7 @@ type readCloser struct {
 
 func (r readCloser) Close() error { return nil }
 
-func (s *FileServer) Get(key string) (io.ReadCloser, error) {
+func (s *FileServer) Get(key, versionID string) (io.ReadCloser, error) {
 	// Check if the file exists locally
 	if s.store.Has(s.ID, key) {
 		log.Printf("[%s] serving file (%s) from local disk\n", s.Transport.Addr(), key)
@@ -121,6 +124,30 @@ func (s *FileServer) Get(key string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("no FileServer instance found for responsible peer: %s", responsiblePeerAddr)
 	}
 
+	// If versionID is specified, get that specific version
+	if versionID != "" {
+		versions, exists := s.metadataStore.GetVersions(key)
+		if !exists {
+			return nil, fmt.Errorf("no versions found for key: %s", key)
+		}
+
+		var versionPath string
+		for _, v := range versions {
+			if v.VersionID == versionID {
+				versionPath = fmt.Sprintf("%s_%s", key, v.VersionID)
+				break
+			}
+		}
+
+		if versionPath == "" {
+			return nil, fmt.Errorf("version %s not found for key: %s", versionID, key)
+		}
+
+		// Read the specific version
+		_, r, err := responsibleFileServer.store.Read(s.EncKey, s.ID, versionPath)
+		return readCloser{r}, err
+	}
+
 	// Read from the responsible peer's store
 	_, r, err := responsibleFileServer.store.Read(s.EncKey, s.ID, key)
 	if err != nil {
@@ -140,8 +167,19 @@ func (s *FileServer) getPeerByAddr(addr string) p2p.Peer {
 	}
 	return nil
 }
-
 func (s *FileServer) Store(key string, r io.Reader) error {
+	// Check if file already exists
+	metadata, exists := s.metadataStore.GetMetadataForFile(key)
+	if exists {
+		// File exists, create new version
+		return s.storeNewVersion(key, r, metadata)
+	}
+
+	// New file, proceed with normal storage
+	return s.storeNewFile(key, r)
+}
+
+func (s *FileServer) storeNewFile(key string, r io.Reader) error {
 	// Determine the responsible peer using consistent hashing
 	s.peerLock.RLock()
 	responsiblePeer := s.getResponsiblePeer(key)
@@ -224,6 +262,82 @@ func (s *FileServer) Store(key string, r io.Reader) error {
 		replicaPeerAddrs[i] = peer.(*p2p.TCPPeer).ListenAddr()
 	}
 	s.metadataStore.AddFile(key, responsiblePeer.(*p2p.TCPPeer).ListenAddr(), replicaPeerAddrs)
+
+	// Calculate file hash
+	hash := sha256.New()
+	if _, err := io.Copy(hash, bytes.NewReader(fileBuffer.Bytes())); err != nil {
+		return fmt.Errorf("failed to calculate file hash: %v", err)
+	}
+	fileHash := hex.EncodeToString(hash.Sum(nil))
+
+	// Get existing metadata
+	metadata, exists := s.metadataStore.GetMetadataForFile(key)
+	if !exists {
+		metadata = store.FileMetadata{
+			Key:             key,
+			ResponsiblePeer: responsiblePeer.(*p2p.TCPPeer).ListenAddr(),
+			ReplicaPeers:    replicaPeerAddrs,
+			Versions:        []store.FileVersion{},
+		}
+	}
+
+	// Add new version
+	newVersion := store.FileVersion{
+		VersionID: crypto.GenerateID(),
+		Timestamp: time.Now(),
+		Size:      fileSize,
+		Hash:      fileHash,
+	}
+	metadata.Versions = append(metadata.Versions, newVersion)
+
+	// Update metadata
+	s.metadataStore.AddFile(key, metadata.ResponsiblePeer, metadata.ReplicaPeers)
+	s.metadataStore.UpdateVersions(key, metadata.Versions)
+
+	return nil
+}
+
+func (s *FileServer) storeNewVersion(key string, r io.Reader, metadata store.FileMetadata) error {
+	// Read the entire file data into a buffer
+	fileBuffer := new(bytes.Buffer)
+	if _, err := io.Copy(fileBuffer, r); err != nil {
+		return fmt.Errorf("failed to read file data into buffer: %v", err)
+	}
+
+	// Calculate file hash
+	hash := sha256.New()
+	if _, err := io.Copy(hash, bytes.NewReader(fileBuffer.Bytes())); err != nil {
+		return fmt.Errorf("failed to calculate file hash: %v", err)
+	}
+	fileHash := hex.EncodeToString(hash.Sum(nil))
+
+	// Create new version
+	newVersion := store.FileVersion{
+		VersionID: crypto.GenerateID(),
+		Timestamp: time.Now(),
+		Size:      int64(fileBuffer.Len()),
+		Hash:      fileHash,
+	}
+
+	// Store the new version
+	responsibleFileServer, exists := s.peerServers[metadata.ResponsiblePeer]
+	if !exists {
+		return fmt.Errorf("no FileServer instance found for responsible peer: %s", metadata.ResponsiblePeer)
+	}
+
+	_, err := responsibleFileServer.store.WriteEncrypt(
+		s.EncKey,
+		s.ID,
+		key,
+		bytes.NewReader(fileBuffer.Bytes()),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store new version: %v", err)
+	}
+
+	// Update metadata with new version
+	metadata.Versions = append(metadata.Versions, newVersion)
+	s.metadataStore.UpdateVersions(key, metadata.Versions)
 
 	return nil
 }
@@ -541,6 +655,13 @@ func (s *FileServer) loop() {
 	for {
 		select {
 		case rpc := <-s.Transport.Consume():
+			if string(rpc.Payload) == "PING" {
+				peer := s.getPeerByAddr(rpc.From) // Get peer from address
+				if peer != nil {
+					s.handleKeepAlive(peer)
+				}
+				continue
+			}
 			var msg Message
 			if err := gob.NewDecoder(bytes.NewReader(rpc.Payload)).Decode(&msg); err != nil {
 				log.Println("error while decoding received message:", err)
@@ -630,20 +751,50 @@ func (s *FileServer) handleMessageDeleteFile(from string, msg MessageDeleteFile)
 	return nil
 }
 
-func (s *FileServer) HealthCheck() {
-	ticker := time.NewTicker(10 * time.Second)
+func (s *FileServer) startHealthMonitor() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ticker.C:
-			for addr, peer := range s.peers {
-				if err := peer.Send([]byte("ping")); err != nil {
-					log.Printf("Peer %s is unhealthy: %v", addr, err)
-					delete(s.peers, addr)
-					s.redistributeFiles(addr)
-				}
-			}
+			go s.checkPeerHealth() // Run health check in separate goroutine
 		case <-s.quitch:
 			return
+		}
+	}
+}
+
+func (s *FileServer) checkPeerHealth() {
+	s.peerLock.RLock()
+	defer s.peerLock.RUnlock()
+
+	for addr, peer := range s.peers {
+		if err := peer.Send([]byte("PING")); err != nil {
+			s.handleUnhealthyPeer(addr)
+		}
+	}
+}
+
+func (s *FileServer) handleUnhealthyPeer(addr string) {
+	s.peerLock.Lock()
+	defer s.peerLock.Unlock()
+
+	// Redistribute files from unhealthy peer
+	s.redistributeFiles(addr)
+
+	// Remove unhealthy peer
+	delete(s.peers, addr)
+	delete(s.peerServers, addr)
+
+	log.Printf("Removed unhealthy peer: %s\n", addr)
+}
+
+func (s *FileServer) handleKeepAlive(peer p2p.Peer) {
+	if tcpPeer, ok := peer.(*p2p.TCPPeer); ok {
+		tcpPeer.MarkAlive()
+		if err := peer.Send([]byte("PONG")); err != nil {
+			log.Printf("Failed to send PONG to peer %s: %v\n", tcpPeer.ListenAddr(), err)
 		}
 	}
 }
@@ -668,6 +819,7 @@ func (s *FileServer) Start() error {
 		return err
 	}
 	s.bootstrapNetwork()
+	go s.startHealthMonitor()
 	s.loop()
 	return nil
 }
@@ -683,7 +835,7 @@ func (s *FileServer) ListFiles() []store.FileMetadata {
 }
 
 func (s *FileServer) Edit(key string) error {
-	reader, err := s.Get(key)
+	reader, err := s.Get(key, "")
 	if err != nil {
 		return fmt.Errorf("failed to get file: %v", err)
 	}
@@ -729,4 +881,35 @@ func (s *FileServer) Edit(key string) error {
 	}
 
 	return nil
+}
+
+func (s *FileServer) ListVersions(key string) ([]store.FileVersion, error) {
+	metadata, exists := s.metadataStore.GetMetadataForFile(key)
+	if !exists {
+		return nil, fmt.Errorf("file with key %s not found", key)
+	}
+	return metadata.Versions, nil
+}
+
+func (s *FileServer) RestoreVersion(key, versionID string) error {
+	// Get the specific version
+	reader, err := s.Get(key, versionID)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	// Store it as the latest version
+	return s.Store(key, reader)
+}
+
+func (s *FileServer) showHealthMessages() {
+	for {
+		select {
+		case msg := <-s.healthMessages:
+			fmt.Print(msg)
+		default:
+			return
+		}
+	}
 }

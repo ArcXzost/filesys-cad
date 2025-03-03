@@ -1,6 +1,9 @@
 package store
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 type MetadataStore struct {
 	mu    sync.RWMutex
@@ -11,6 +14,14 @@ type FileMetadata struct {
 	Key             string
 	ResponsiblePeer string   // Address of the responsible peer
 	ReplicaPeers    []string // Addresses of the replica peers
+	Versions        []FileVersion
+}
+
+type FileVersion struct {
+	VersionID string
+	Timestamp time.Time
+	Size      int64
+	Hash      string // SHA-256 hash of the file content
 }
 
 func NewMetadataStore() *MetadataStore {
@@ -73,4 +84,23 @@ func (m *MetadataStore) ListFiles() []FileMetadata {
 		files = append(files, metadata)
 	}
 	return files
+}
+
+func (m *MetadataStore) UpdateVersions(key string, versions []FileVersion) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if metadata, exists := m.files[key]; exists {
+		metadata.Versions = versions
+		m.files[key] = metadata
+	}
+}
+
+func (m *MetadataStore) GetVersions(key string) ([]FileVersion, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	metadata, exists := m.files[key]
+	if !exists {
+		return nil, false
+	}
+	return metadata.Versions, true
 }

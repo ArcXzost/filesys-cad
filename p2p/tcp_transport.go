@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
 
 // This represents a remote node on a TCP connection
@@ -18,9 +19,12 @@ type TCPPeer struct {
 	// storageRoot string
 	// if we dial a connection => outbound = true
 	// if we accept a connection => outbound = false
-	outbound   bool
-	listenAddr string
-	wg         *sync.WaitGroup
+	outbound    bool
+	listenAddr  string
+	wg          *sync.WaitGroup
+	lastSeen    time.Time
+	isAlive     bool
+	healthMutex sync.RWMutex
 }
 
 func (p *TCPPeer) Write(data []byte) (int, error) {
@@ -173,4 +177,17 @@ func (t *TCPTransport) handleConn(conn net.Conn, outbound bool) {
 		}
 		t.rpcch <- rpc // Send the decoded RPC to the channel
 	}
+}
+
+func (p *TCPPeer) MarkAlive() {
+	p.healthMutex.Lock()
+	defer p.healthMutex.Unlock()
+	p.lastSeen = time.Now()
+	p.isAlive = true
+}
+
+func (p *TCPPeer) IsAlive() bool {
+	p.healthMutex.RLock()
+	defer p.healthMutex.RUnlock()
+	return p.isAlive && time.Since(p.lastSeen) < 2*time.Minute
 }
