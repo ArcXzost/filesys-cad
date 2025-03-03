@@ -61,53 +61,53 @@ The system provides an interactive CLI for managing files and peers. Here are th
 ### Basic Commands
 - **Store a file**:
   ```bash
-  dfs upload --path /path/to/file
+  upload --path /path/to/file
   ```
 
 - **Retrieve a file**:
   ```bash
-  dfs get --key <file_key>
+  get --key <file_key>
   ```
 
 - **Delete a file**:
   ```bash
-  dfs delete --key <file_key>
+  delete --key <file_key>
   ```
 
 - **List all files**:
   ```bash
-  dfs list
+  list
   ```
 
 ### File Versioning
 
 - **List file versions**:
   ```bash
-  dfs versions --key <file_key>
+  versions --key <file_key>
   ```
 
 - **Restore a specific version**:
   ```bash
-  dfs restore --key <file_key> --version <version_id>
+  restore --key <file_key> --version <version_id>
   ```
 
 ### Peer Management
 
 - **Start additional peers**:
   ```bash
-  dfs start-peers --count <number_of_peers>
+  start-peers --count <number_of_peers>
   ```
 
 - **Show node health**:
   ```bash
-  dfs health
+  health
   ```
 
 ### Editing Files
 
 - **Edit a file**:
   ```bash
-  dfs edit --key <file_key>
+  edit --key <file_key>
   ```
 
 ## Architecture
