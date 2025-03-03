@@ -1,4 +1,4 @@
-# Peer-to-peer Content-Addressable Distributed File System (CADFS)
+# A Distributed File System with Content Addressable Storage
 
 ## Overview
 
