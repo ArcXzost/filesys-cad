@@ -63,3 +63,14 @@ func contains(slice []string, item string) bool {
 	}
 	return false
 }
+
+func (m *MetadataStore) ListFiles() []FileMetadata {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	files := make([]FileMetadata, 0, len(m.files))
+	for _, metadata := range m.files {
+		files = append(files, metadata)
+	}
+	return files
+}

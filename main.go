@@ -36,8 +36,6 @@ func makeServer(listenAddr string, nodes ...string) *FileServer {
 	fs := NewFileServer(fileServerOpts)
 	tcpTransport.OnPeer = fs.onPeer
 
-	go fs.loop() // Ensure the loop method is called
-
 	return fs
 }
 
@@ -168,9 +166,19 @@ func main() {
 				Name:  "list",
 				Usage: "List all files in the system",
 				Action: func(c *cli.Context) error {
-					// Implement a method in FileServer to list files
-					// For now, this is a placeholder
-					fmt.Println("Listing files is not yet implemented.")
+					files := s.ListFiles()
+					if len(files) == 0 {
+						fmt.Println("No files found")
+						return nil
+					}
+
+					fmt.Println("Files in the system:")
+					for i, file := range files {
+						fmt.Printf("%d. Key: %s\n", i+1, file.Key)
+						fmt.Printf("   Responsible Peer: %s\n", file.ResponsiblePeer)
+						fmt.Printf("   Replica Peers: %v\n", file.ReplicaPeers)
+						fmt.Println("   -------------------------")
+					}
 					return nil
 				},
 			},
@@ -191,6 +199,28 @@ func main() {
 						s.peerServers[fmt.Sprintf(":%d", port)] = peer
 						go peer.Start()
 					}
+					return nil
+				},
+			},
+			{
+				Name:  "edit",
+				Usage: "Edit a file in the system",
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "key",
+						Usage: "Key of the file to edit",
+					},
+				},
+				Action: func(c *cli.Context) error {
+					key := c.String("key")
+					if key == "" {
+						return fmt.Errorf("please provide a key")
+					}
+					err := s.Edit(key)
+					if err != nil {
+						return fmt.Errorf("failed to edit file: %v", err)
+					}
+					fmt.Printf("File with key %s edited successfully\n", key)
 					return nil
 				},
 			},

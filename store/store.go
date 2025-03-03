@@ -14,8 +14,6 @@ import (
 	"filesys-cad/crypto"
 )
 
-const defaultRootFolderName = "cas"
-
 func CASPathTransformFunc(key string) PathKey {
 	hash := sha1.Sum([]byte(key))
 	hashStr := hex.EncodeToString(hash[:])
@@ -60,20 +58,53 @@ var DefaultPathTransformFunc = func(key string) PathKey {
 	}
 }
 
+// Add to store/store.go
+
+// Add a map to track open file handles
 type Store struct {
 	StoreOpts
 }
 
+// Update NewStore to initialize the map
 func NewStore(opts StoreOpts) *Store {
 	if opts.PathTransformFunc == nil {
 		opts.PathTransformFunc = DefaultPathTransformFunc
 	}
-	if len(opts.Root) == 0 {
-		opts.Root = defaultRootFolderName
-	}
 	return &Store{
 		StoreOpts: opts,
 	}
+}
+
+// Update readStream to track file handles
+func (s *Store) readStream(encKey []byte, id string, key string) (int64, io.ReadCloser, error) {
+	pathKey := s.PathTransformFunc(key)
+	fullPathWithRoot := fmt.Sprintf("%s/%s/%s", s.Root, id, pathKey.fullPath())
+
+	file, err := os.Open(fullPathWithRoot)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	fi, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return 0, nil, err
+	}
+
+	// Create a pipe for streaming
+	pr, pw := io.Pipe()
+
+	// Start a goroutine to handle the decryption
+	go func() {
+		defer file.Close()
+		defer pw.Close()
+
+		if _, err := crypto.CopyDecrypt(encKey, file, pw); err != nil {
+			pw.CloseWithError(err)
+		}
+	}()
+
+	return fi.Size(), pr, nil
 }
 
 func (s *Store) Has(id string, key string) bool {
@@ -116,6 +147,7 @@ func (s *Store) WriteDecrypt(encKey []byte, id string, key string, r io.Reader) 
 	if err != nil {
 		return 0, err
 	}
+	defer f.Close()
 	n, err := crypto.CopyDecrypt(encKey, r, f)
 	return int64(n), err
 }
@@ -125,6 +157,7 @@ func (s *Store) WriteEncrypt(encKey []byte, id string, key string, r io.Reader) 
 	if err != nil {
 		return 0, err
 	}
+	defer f.Close()
 	n, err := crypto.CopyEncrypt(encKey, r, f)
 	return int64(n), err
 }
@@ -160,35 +193,4 @@ func (s *Store) writeStream(id string, key string, r io.Reader) (int64, error) {
 
 func (s *Store) Read(encKey []byte, id string, key string) (int64, io.Reader, error) {
 	return s.readStream(encKey, id, key)
-}
-
-func (s *Store) readStream(encKey []byte, id string, key string) (int64, io.ReadCloser, error) {
-	pathKey := s.PathTransformFunc(key)
-	fullPathWithRoot := fmt.Sprintf("%s/%s/%s", s.Root, id, pathKey.fullPath())
-
-	file, err := os.Open(fullPathWithRoot)
-	if err != nil {
-		return 0, nil, err
-	}
-
-	fi, err := file.Stat()
-	if err != nil {
-		file.Close()
-		return 0, nil, err
-	}
-
-	// Create a pipe for streaming
-	pr, pw := io.Pipe()
-
-	// Start a goroutine to handle the decryption
-	go func() {
-		defer file.Close()
-		defer pw.Close()
-
-		if _, err := crypto.CopyDecrypt(encKey, file, pw); err != nil {
-			pw.CloseWithError(err)
-		}
-	}()
-
-	return fi.Size(), pr, nil
 }

@@ -11,6 +11,7 @@ import (
 	"math"
 	"math/big"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -86,12 +87,18 @@ type MessageDeleteFile struct {
 	Key string
 }
 
-func (s *FileServer) Get(key string) (io.Reader, error) {
+type readCloser struct {
+	io.Reader
+}
+
+func (r readCloser) Close() error { return nil }
+
+func (s *FileServer) Get(key string) (io.ReadCloser, error) {
 	// Check if the file exists locally
 	if s.store.Has(s.ID, key) {
 		log.Printf("[%s] serving file (%s) from local disk\n", s.Transport.Addr(), key)
 		_, r, err := s.store.Read(s.EncKey, s.ID, key)
-		return r, err
+		return readCloser{r}, err
 	}
 
 	// Get metadata for the file
@@ -120,7 +127,7 @@ func (s *FileServer) Get(key string) (io.Reader, error) {
 		return nil, fmt.Errorf("failed to read from responsible peer: %v", err)
 	}
 
-	return r, nil
+	return readCloser{r}, nil
 }
 
 func (s *FileServer) getPeerByAddr(addr string) p2p.Peer {
@@ -178,7 +185,7 @@ func (s *FileServer) Store(key string, r io.Reader) error {
 
 	// Replicate the file to replica peers
 	s.peerLock.RLock()
-	replicaPeers := s.getReplicaPeers(key, 2, responsiblePeer)
+	replicaPeers := s.getReplicaPeers(key, 2, responsiblePeer.(*p2p.TCPPeer).ListenAddr())
 	s.peerLock.RUnlock()
 
 	for _, peer := range replicaPeers {
@@ -304,18 +311,19 @@ func (s *FileServer) getResponsiblePeer(key string) p2p.Peer {
 	return responsiblePeer
 }
 
-func (s *FileServer) getReplicaPeers(key string, numReplicas int, responsiblePeer p2p.Peer) []p2p.Peer {
+func (s *FileServer) getReplicaPeers(key string, numReplicas int, responsiblePeerAddr string) []p2p.Peer {
 	hash := sha256.Sum256([]byte(key))
 	hashInt := new(big.Int).SetBytes(hash[:])
 
-	// Lock the peer map for reading
 	s.peerLock.RLock()
 	defer s.peerLock.RUnlock()
 
 	// Sort peers by their hash distance to the key
 	peers := make([]p2p.Peer, 0, len(s.peers))
-	for _, peer := range s.peers {
-		peers = append(peers, peer)
+	for addr, peer := range s.peers {
+		if addr != responsiblePeerAddr {
+			peers = append(peers, peer)
+		}
 	}
 
 	sort.Slice(peers, func(i, j int) bool {
@@ -330,19 +338,11 @@ func (s *FileServer) getReplicaPeers(key string, numReplicas int, responsiblePee
 		return distanceI.Cmp(distanceJ) < 0
 	})
 
-	// Select the next `numReplicas` peers as replicas, excluding the responsible peer
-	// responsiblePeer := s.getResponsiblePeer(key)
-	replicaPeers := make([]p2p.Peer, 0, numReplicas)
-	for _, peer := range peers {
-		if peer != responsiblePeer {
-			replicaPeers = append(replicaPeers, peer)
-			if len(replicaPeers) == numReplicas {
-				break
-			}
-		}
+	// Select the next `numReplicas` peers as replicas
+	if len(peers) > numReplicas {
+		return peers[:numReplicas]
 	}
-
-	return replicaPeers
+	return peers
 }
 
 func (s *FileServer) redistributeFiles(unhealthyPeerAddr string) {
@@ -463,27 +463,27 @@ was successful or not.
 func (s *FileServer) Delete(key string) error {
 	// Get the responsible peer
 	s.peerLock.RLock()
-	responsiblePeer := s.getResponsiblePeer(key)
+	metadata, exists := s.metadataStore.GetMetadataForFile(key)
 	s.peerLock.RUnlock()
-	if responsiblePeer == nil {
+	if !exists {
 		return fmt.Errorf("no responsible peer found for key: %s", key)
 	}
 
 	// Delete from responsible peer
 	s.peerLock.RLock()
-	responsibleFileServer, exists := s.peerServers[responsiblePeer.(*p2p.TCPPeer).ListenAddr()]
+	responsibleFileServer, exists := s.peerServers[metadata.ResponsiblePeer]
 	s.peerLock.RUnlock()
 	if !exists {
-		return fmt.Errorf("no FileServer instance found for responsible peer: %s", responsiblePeer.RemoteAddr().String())
+		return fmt.Errorf("no FileServer instance found for responsible peer: %s", metadata.ResponsiblePeer)
 	}
 
 	if err := responsibleFileServer.store.Delete(s.ID, key); err != nil {
-		return fmt.Errorf("failed to delete data: %v", err)
+		return fmt.Errorf("failed to delete data from responsible peer: %v", err)
 	}
 
 	// Delete from replica peers
 	s.peerLock.RLock()
-	replicaPeers := s.getReplicaPeers(key, 2, responsiblePeer)
+	replicaPeers := s.getReplicaPeers(key, 2, metadata.ResponsiblePeer)
 	s.peerLock.RUnlock()
 
 	for _, peer := range replicaPeers {
@@ -676,4 +676,57 @@ func init() {
 	gob.Register(MessageStoreFile{})
 	gob.Register(MessageGetFile{})
 	gob.Register(MessageDeleteFile{})
+}
+
+func (s *FileServer) ListFiles() []store.FileMetadata {
+	return s.metadataStore.ListFiles()
+}
+
+func (s *FileServer) Edit(key string) error {
+	reader, err := s.Get(key)
+	if err != nil {
+		return fmt.Errorf("failed to get file: %v", err)
+	}
+	defer reader.Close()
+
+	// Read the existing content
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		return fmt.Errorf("failed to read file content: %v", err)
+	}
+
+	// Create a temporary file with the existing content
+	tmpFile, err := os.CreateTemp("", "dfs_edit_*.txt")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.Write(content); err != nil {
+		return fmt.Errorf("failed to write to temporary file: %v", err)
+	}
+	tmpFile.Close()
+
+	// Open the file in VSCode
+	cmd := exec.Command("code", "--wait", tmpFile.Name())
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("editor failed: %v", err)
+	}
+
+	// Read the edited content
+	editedContent, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		return fmt.Errorf("failed to read edited file: %v", err)
+	}
+
+	// Store the updated content using the responsible peer's FileServer
+	if err := s.Store(key, bytes.NewReader(editedContent)); err != nil {
+		return fmt.Errorf("failed to store updated file: %v", err)
+	}
+
+	return nil
 }
