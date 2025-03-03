@@ -1,4 +1,4 @@
-# FileSys-CAS: A Distributed File System with Content Addressable Storage
+# FileSyS-CAS: A Distributed File System with Content Addressable Storage
 
 ## Overview
 
